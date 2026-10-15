@@ -1,0 +1,8 @@
+{
+  "name": "omp-jev-router",
+  "version": "0.1.0",
+  "description": "omp extension: route each turn to the smol, default, or slow model with an OpenRouter decision model (Jev)",
+  "license": "MIT",
+  "type": "module",
+  "omp": { "extensions": ["./jev-router.ts"] }
+}
