@@ -236,7 +236,8 @@ export default function (pi) {
     const text = event.content.map((c) => (c.type === "text" ? c.text : "[image]")).join("\n");
     steps.push(`tool result${event.isError ? " (error)" : ""}: ${text.slice(0, 1500)}`);
     // Route once per batch, after its last result; omp awaits this before the next LLM call.
-    if (--pendingTools !== 0) return;
+    // A result with no counted call (omp replaying unpaired tool calls on retry) routes at once.
+    if (pendingTools > 0 && --pendingTools > 0) return;
     const targets = loadConfig().step;
     if (targets.length) await route(ctx, "step", targets);
   });

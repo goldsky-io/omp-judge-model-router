@@ -112,16 +112,40 @@ python3 bench/bench.py --configs omp-auto,prompt-both --tasks fix-bug,lru-ttl
 
 The tasks are a two-question chat, a bug fix, a rename across files, a new function with tests, a subtle bug (a mutable default argument), and an LRU cache with expiry. Costs come from the session files: LLM usage, omp's built-in judge calls, and this extension's judge calls. The script appends raw rows to `bench-results.jsonl`.
 
-Results from October 2026, with Claude Opus 5.5 as `default` and `zai/glm-5.3-flash` as `smol`, 6 tasks × 2 runs per configuration:
+### Results
 
-| Configuration | Passed | Cost $ | Judge calls | Median wall s |
-|---|---|---|---|---|
-| omp alone, `--thinking auto` | 12/12 | 0.784 | 0 | 12 |
-| `prompt` = model, effort (default) | 12/12 | 0.517 | 16 | 13 |
-| `prompt` = model, effort; `step` = effort | 12/12 | 0.518 | 40 | 13 |
-| `prompt` = model, effort; `step` = model, effort | 12/12 | 0.487 | 42 | 16 |
+Run on October 15, 2026, with omp 18.10.4, Claude Opus 5.5 as `default`, `zai/glm-5.3-flash` as `smol`, no `slow` role, and `openrouter/~typesafe/jev-latest` as the judge. Each configuration ran 6 tasks 2 times. Every run passed its check.
 
-The default cost 34% less than omp alone. Most of the saving came from prompts that never reached Opus: the chat and the rename cost about $0.002 each on glm-flash, against $0.04 to $0.06 on Opus. Routing the effort at each step added judge calls and saved nothing, because the judge kept `low` for these tasks. Routing the model at each step saved another 6% but took 25% longer and moved more of the work to the small model. These tasks are small, so the benchmark does not show how a small model does on long, hard work. Run it with your own tasks before you turn on `step` routing.
+| Configuration | Passed | Cost $ | vs omp auto | Judge calls | Judge $ | Median wall s | Opus / glm-flash calls |
+|---|---|---|---|---|---|---|---|
+| omp alone, `--thinking high` | 12/12 | 1.067 | +33% | 0 | 0 | 14 | 50 / 0 |
+| omp alone, `--thinking auto` | 12/12 | 0.805 | | 0 | 0 | 12 | 41 / 0 |
+| `prompt` = effort | 12/12 | 0.750 | −7% | 16 | 0.0003 | 13 | 41 / 0 |
+| `prompt` = model | 12/12 | 0.571 | −29% | 16 | 0.0003 | 13 | 26 / 15 |
+| `prompt` = model, effort (default) | 12/12 | 0.534 | −34% | 16 | 0.0004 | 15 | 25 / 18 |
+| `prompt` = model, effort; `step` = effort | 12/12 | 0.521 | −35% | 43 | 0.0016 | 14 | 24 / 19 |
+| `prompt` = model, effort; `step` = model, effort | 12/12 | 0.443 | −45% | 44 | 0.0017 | 13 | 18 / 26 |
+
+Mean cost per run in dollars, by task:
+
+| Task | omp high | omp auto | prompt: effort | prompt: model | prompt: both | + step: effort | + step: both |
+|---|---|---|---|---|---|---|---|
+| qa | 0.040 | 0.039 | 0.040 | 0.001 | 0.001 | 0.001 | 0.001 |
+| rename | 0.092 | 0.062 | 0.063 | 0.002 | 0.002 | 0.003 | 0.003 |
+| fix-bug | 0.070 | 0.066 | 0.066 | 0.059 | 0.060 | 0.058 | 0.037 |
+| feature | 0.112 | 0.061 | 0.064 | 0.062 | 0.063 | 0.061 | 0.062 |
+| debug-subtle | 0.087 | 0.093 | 0.059 | 0.094 | 0.059 | 0.059 | 0.050 |
+| lru-ttl | 0.132 | 0.081 | 0.083 | 0.068 | 0.082 | 0.078 | 0.069 |
+
+What the results show:
+
+- Model routing per prompt gives most of the saving. Prompts that the judge sent to glm-flash never reached Opus: the chat and the rename cost about $0.002 each, against $0.04 to $0.09 on Opus.
+- Effort routing alone saves little, because omp's `auto` already picks `low` for most of these tasks. The `high` default costs 33% more than `auto` and passed no more tasks.
+- Effort routing at each step saved 2% and made 2.7 times as many judge calls. The judge kept `low` at every step of these tasks.
+- Model routing at each step saved the most. In an earlier run with the same code but an older wording of the effort question, it saved 6% over the default and took 25% longer. The size of this saving changes between runs.
+- The judge requests cost less than 0.4% of the total in every configuration.
+
+The default stays at `prompt` = model and effort, with no `step` routing. These six tasks are short, and a small model finishes all of them. They do not show what happens when the small model takes over steps of a long, hard task, where a failed step costs more than the saving. To measure that, run step routing on a benchmark with harder tasks before you turn it on. To turn it on, run `/judge-router step model,effort`.
 
 ## Uninstall
 
