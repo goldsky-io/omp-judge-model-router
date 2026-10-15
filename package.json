@@ -1,8 +1,9 @@
 {
-  "name": "omp-jev-router",
-  "version": "0.1.0",
-  "description": "omp extension: route each turn to the smol, default, or slow model with an OpenRouter decision model (Jev)",
+  "name": "omp-judge-model-router",
+  "version": "0.2.0",
+  "description": "omp extension: route each turn to the smol, default, or slow model with a judge (decision) model",
   "license": "MIT",
   "type": "module",
-  "omp": { "extensions": ["./jev-router.ts"] }
+  "repository": "github:goldsky-io/omp-judge-model-router",
+  "omp": { "extensions": ["./judge-model-router.ts"] }
 }
