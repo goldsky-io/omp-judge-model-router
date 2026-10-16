@@ -24,8 +24,6 @@ import sys
 import urllib.request
 
 URL = "https://openrouter.ai/api/alpha/decisions"
-MAX_STATE_CHARS = 8000
-# Copied from judge-model-router.ts; keep in sync.
 TIERS = {
     "smol": "Trivial or mechanical work: a lookup, a rename, a one-line edit, a short factual answer, or casual chat.",
     "default": "Ordinary coding work: implement or change a feature, fix a clear bug, write tests or docs.",
@@ -35,6 +33,35 @@ STEP_INSTRUCTIONS = (
     "A coding agent is working on the user task. Pick the cheapest model tier that can do its next step well, "
     "given the recent steps."
 )
+# How much context each state carries. `current` is what the extension sends today.
+# `project` adds a repo block derived from the row's real source metadata, approximating
+# what a project block from cwd/AGENTS.md would tell the judge.
+MAX_STATE_CHARS = 8000  # copied from judge-model-router.ts; keep in sync
+
+def state_for(row: dict, context: str = "current") -> dict:
+    messages = row["messages"]
+    first = next((i for i, m in enumerate(messages) if m["role"] == "user"), 0)
+    steps = []
+    for m in messages[first + 1 :]:
+        text = content_text(m.get("content"))
+        if text:
+            steps.append(f"{m['role']}: {text[:1500]}")
+        for call in m.get("tool_calls") or []:
+            fn = call.get("function", {})
+            steps.append(f"tool call {fn.get('name')}: {str(fn.get('arguments'))[:300]}")
+    task = content_text(messages[first]["content"]) if messages else ""
+    budget = 16000 if context == "steps16k" else MAX_STATE_CHARS
+    state: dict = {"user_task": task[:budget], "recent_steps": "\n".join(steps)[-budget:]}
+    if context == "task":
+        del state["recent_steps"]
+    if context in ("project", "full"):
+        state["project"] = {
+            "repo": row["instance_id"].rsplit("-", 1)[0].replace("__", "/"),
+            "benchmark": row["benchmark"],
+            "scenario": row["scenario"],
+        }
+    return state
+
 VARIANTS = {
     "plugin": ({"smol": TIERS["smol"], "default": TIERS["default"]}, {"smol": 0, "default": 3}),
     "4tier": (
@@ -53,21 +80,6 @@ def content_text(content) -> str:
     if isinstance(content, str):
         return content
     return "\n".join(p.get("text", "") for p in content or [] if isinstance(p, dict))
-
-
-def state_for(row: dict) -> dict:
-    messages = row["messages"]
-    first = next((i for i, m in enumerate(messages) if m["role"] == "user"), 0)
-    steps = []
-    for m in messages[first + 1 :]:
-        text = content_text(m.get("content"))
-        if text:
-            steps.append(f"{m['role']}: {text[:1500]}")
-        for call in m.get("tool_calls") or []:
-            fn = call.get("function", {})
-            steps.append(f"tool call {fn.get('name')}: {str(fn.get('arguments'))[:300]}")
-    task = content_text(messages[first]["content"]) if messages else ""
-    return {"user_task": task[:MAX_STATE_CHARS], "recent_steps": "\n".join(steps)[-MAX_STATE_CHARS:]}
 
 
 def judge(model: str, criteria: dict, state: dict) -> tuple[str, float]:
@@ -89,6 +101,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--repo", required=True)
     p.add_argument("--variant", choices=[*VARIANTS, "all"], default="all")
+    p.add_argument("--context", choices=["current", "task", "steps16k", "project", "full"], default="current",
+                   help="how much context each state carries; `current` is what the extension sends today")
     p.add_argument("--model", default="~typesafe/jev-latest")
     p.add_argument("--n", type=int, default=None, help="proportional sample size; default is all 970 rows")
     p.add_argument("--jobs", type=int, default=16)
@@ -102,15 +116,17 @@ def main() -> None:
         cost = 0.0
         # Judge every row up front in parallel; the scorer then reads the cached answers.
         with cf.ThreadPoolExecutor(a.jobs) as pool:
-            answers = dict(zip((r["id"] for r in rows), pool.map(lambda r: judge(a.model, criteria, state_for(r)), rows)))
+            answers = dict(zip((r["id"] for r in rows), pool.map(lambda r: judge(a.model, criteria, state_for(r, a.context)), rows)))
         cost = sum(c for _, c in answers.values())
+        label = f"{a.model} ({variant}, context={a.context})"
         summary = run_question_bank_eval(
             FunctionPredictor(lambda row: to_tier[answers[row["id"]][0]]),
-            predictor_label=f"{a.model} ({variant})",
+            predictor_label=label,
             n=a.n,
             extra_summary={"judge_cost_usd": cost},
         )
-        out = pathlib.Path(__file__).with_name(f"twinrouter-{variant}.json")
+        suffix = "" if a.context == "current" else f"-{a.context}"
+        out = pathlib.Path(__file__).with_name(f"twinrouter-{variant}{suffix}.json")
         compact = {k: summary[k] for k in ("classifier", "judge_cost_usd", "scores_v2", "router_accounting") if k in summary}
         out.write_text(json.dumps(compact, indent=2))
         v = summary["scores_v2"]

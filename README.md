@@ -24,8 +24,10 @@ The extension can route at two intervals:
 
 | Interval | When the judge runs | What it sees |
 |---|---|---|
-| `prompt` | Before each user prompt | The prompt |
-| `step` | After each batch of tool results, before the next LLM request in the tool loop | The prompt, the current tier and effort, and the latest tool calls and results |
+| `prompt` | Before each user prompt | The prompt, the previous user turn and assistant reply, and the project `AGENTS.md` |
+| `step` | After each batch of tool results, before the next LLM request in the tool loop | The same context, the current tier and effort, and the latest tool calls and results |
+
+The extension reads `AGENTS.md`, or `CLAUDE.md` if there is no `AGENTS.md`, from the working directory only. It sends the first 12,000 characters of that file. It also sends up to 2,000 characters of each side of the previous exchange. With this exchange, the judge can route a short reply such as "yes, do it" by the work that the reply approves.
 
 At each interval, the extension can route the model, the effort, both, or nothing. One judge request answers every question for that interval. The default is `prompt` = model and effort, and `step` = nothing. The [benchmarks](#benchmarks) show why.
 
@@ -92,10 +94,10 @@ The judge picks the lowest of four levels that it expects to be enough.
 
 | Level | Used for |
 |---|---|
-| `low` | Most coding work: reading, searching, commands, clear edits, standard implementations |
-| `medium` | Tricky but well-specified logic, or a result that needs interpretation |
-| `high` | A failure with no obvious cause, or a subtle correctness or concurrency problem |
-| `xhigh` | Open-ended design across many parts, or a problem that still fails after several attempts |
+| `low` | Work whose next step is already specified and local: reading, searching, commands, clear edits. A short reply approves or continues work of this kind. |
+| `medium` | Specified work with constraints to get right: changes across many call sites, ordering or size limits, or a choice among given options. |
+| `high` | Subtle correctness: intermittent failures, races, timing assumptions, or a fix that already failed once. |
+| `xhigh` | Open-ended design across many parts, or a problem that still fails after several attempts. |
 
 omp lowers a level that the current model does not support to the nearest supported level. If the prompt contains the word `ultrathink`, the extension sets `max` and does not ask the judge about the effort.
 
@@ -237,6 +239,8 @@ git clone https://github.com/CommonstackAI/TwinRouterBench
 cd TwinRouterBench && uv venv && uv pip install -e . && cd -
 TwinRouterBench/.venv/bin/python bench/twinrouter/eval_judge.py --repo TwinRouterBench
 ```
+
+Pass `--context` to ablate how much context each state carries: `task` sends the user task only, `steps16k` doubles the recent-steps budget, `project` adds a repo block from the row's source metadata, and `full` combines the last two. The default, `current`, is what the extension sends today.
 
 #### Results
 

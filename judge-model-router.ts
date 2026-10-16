@@ -35,10 +35,12 @@ const TIERS: Record<string, string> = {
 };
 // `max` is reserved for the `ultrathink` keyword, as in omp's built-in classifier.
 // Biased low: in benchmarks, tasks passed at `low` and higher levels only added cost.
+// Short replies inherit the difficulty of the work they approve; the level tracks the
+// work the turn implies, not the length of the message.
 const EFFORTS: Record<string, string> = {
-  low: "Most coding work: reading, searching, running commands, clear edits, and standard implementations.",
-  medium: "Tricky but well-specified logic, or a result that needs interpretation.",
-  high: "A failure with no obvious cause, or a subtle correctness or concurrency problem.",
+  low: "Work whose next step is already fully specified and local: reading, searching, running commands, a clear edit, a mechanical change, or approving or continuing such work.",
+  medium: "Well-specified work with real constraints to get right: changes that must hold across many call sites, ordering, rate or size limits, or a small design choice among given options.",
+  high: "Subtle correctness: intermittent failures, races, timing or time-zone assumptions, state that must stay consistent, or a fix that has already failed at least once.",
   xhigh: "Open-ended design across many parts, or a problem that still fails after several attempts.",
 };
 
@@ -76,6 +78,41 @@ function parseTargets(text: string): Target[] | undefined {
   if (text === "none") return [];
   const targets = text.split(",").map((t) => t.trim());
   return targets.every((t) => t === "model" || t === "effort") ? (targets as Target[]) : undefined;
+}
+
+const MAX_CONTEXT_CHARS = 2000;
+// ponytail: reads only the cwd file; omp also merges AGENTS.md files from parent dirs.
+const MAX_AGENTS_CHARS = 12000; // keeps the whole state under Jev's ~32k-byte fast mode
+
+/** The project's AGENTS.md (or CLAUDE.md) in `cwd`, head-truncated. */
+function projectInstructions(cwd: string): Record<string, string> {
+  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+    try {
+      return { project_agents_md: fs.readFileSync(path.join(cwd, name), "utf8").slice(0, MAX_AGENTS_CHARS) };
+    } catch {}
+  }
+  return {};
+}
+
+/** The exchange before the new prompt, so a reply such as "yes" routes on the work it approves. */
+function previousExchange(ctx): Record<string, string> {
+  const text = (m) =>
+    typeof m.content === "string" ? m.content : (m.content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("\n");
+  let assistant = "";
+  for (const e of ctx.sessionManager.getBranch().toReversed()) {
+    if (e.type !== "message" || (e.message.role !== "user" && e.message.role !== "assistant")) continue;
+    if (e.message.role === "assistant") {
+      assistant ||= text(e.message);
+      continue;
+    }
+    // An interrupted turn (user message with no reply) yields no exchange rather than a stale one.
+    if (!assistant) return {};
+    return {
+      previous_user_turn: text(e.message).slice(0, MAX_CONTEXT_CHARS),
+      previous_assistant_reply: assistant.slice(-MAX_CONTEXT_CHARS),
+    };
+  }
+  return {};
 }
 
 export default function (pi) {
@@ -119,6 +156,7 @@ export default function (pi) {
   let steps: string[] = []; // assistant text, tool calls, and tool results since that prompt
   let pendingTools = 0; // tool results still due for the latest assistant message
   let ultrathink = false;
+  let context: Record<string, string> = {}; // project AGENTS.md and the exchange before the latest prompt
   let lastEffort: string | undefined; // effort after this extension's last change; anything else is a manual change
   let effortPaused = false;
 
@@ -174,14 +212,19 @@ export default function (pi) {
         if (!judge) throw new Error(`${config.judge} is not a judge model`);
         const apiKey = await ctx.modelRegistry.getApiKey(judge);
         if (!apiKey) throw new Error(`no ${judge.provider} credential for ${config.judge}`);
+        // Jev runs a slower, less accurate long-context mode past ~32k bytes (OpenRouter Jev guide).
+        // Give recent_steps whatever byte budget the other fields leave.
+        const contextChars = JSON.stringify(context).length;
+        const stepsBudget = Math.max(0, 30_000 - task.length - contextChars - 200);
         const state =
           interval === "prompt"
-            ? { user_turn: task }
+            ? { user_turn: task, ...context }
             : {
                 user_task: task,
+                ...context,
                 current_tier: [...models].find(([, m]) => key(m) === key(current))?.[0],
                 current_effort: pi.getThinkingLevel(),
-                recent_steps: steps.join("\n").slice(-MAX_STATE_CHARS),
+                recent_steps: stepsBudget ? steps.join("\n").slice(-stepsBudget) : "",
               };
         const result = await createNativeJudge(judge, { apiKey }).judge(
           { state, questions },
@@ -214,6 +257,7 @@ export default function (pi) {
     task = prompt.slice(0, MAX_STATE_CHARS);
     steps = [];
     pendingTools = 0;
+    context = { ...projectInstructions(ctx.cwd), ...previousExchange(ctx) };
     // ponytail: approximates omp's matcher; does not skip code blocks.
     ultrathink = /(^|[^\w/\\.-])ultrathink(?![\w/\\(-]|\.\w)/.test(prompt);
     await route(ctx, "prompt", loadConfig().prompt);
