@@ -2,6 +2,24 @@
 
 An [omp](https://github.com/can1357/oh-my-pi) extension that picks the model and the thinking effort for each turn. It asks a judge model. A judge model (also called a decision model) answers typed questions, for example a choice between labels.
 
+## Measured benefits
+
+The default configuration cut reported model costs by 34% on local tasks and 42% on a Terminal-Bench 2.0 subset.
+
+| Benchmark | Without the extension | With the extension |
+|---|---|---|
+| 6 local tasks, 2 runs each | $0.805, 12/12 passed | $0.534, 12/12 passed |
+| 15 Terminal-Bench 2.0 tasks, 1 run each | $1.74, 12/15 passed | $1.01, 13/15 passed |
+| TwinRouterBench static, 970 labeled steps | Always-high combined score: 54.4 | Two-tier judge combined score: 72.7 |
+
+Local tasks saved money when the judge chose a smaller model. Terminal-Bench saved money through lower thinking effort, while every prompt stayed on Opus.
+
+These results use Opus 5.5, glm-5.3-flash, and Jev. The samples are small, so they do not establish a quality improvement. TwinRouterBench scores tier choices, not completed agent tasks.
+
+The default routes the model and effort once per prompt, without step routing. See [benchmark methods and results](#benchmarks) for costs, task outcomes, and limits.
+
+## How it works
+
 The extension can route at two intervals:
 
 | Interval | When the judge runs | What it sees |
@@ -104,14 +122,6 @@ Each judge request costs about $0.00002 with Jev and adds about one second befor
 ## Benchmarks
 
 Three benchmarks measure the extension. The local benchmark runs short tasks with omp in print mode. Terminal-Bench 2.0 runs real terminal tasks with omp over ACP (Agent Client Protocol). The TwinRouterBench static track scores only the judge's tier choices, without running an agent.
-
-| Benchmark | What it measures | Default config result |
-|---|---|---|
-| Local tasks | Cost and pass rate on 6 short coding tasks | 34% cheaper than omp `auto`, 12/12 passed |
-| Terminal-Bench 2.0 subset | Cost and pass rate on 15 terminal tasks | 42% cheaper than omp `auto`, 13/15 passed (omp `auto`: 12/15) |
-| TwinRouterBench static | Tier choice on 970 agent steps | Combined score 72.7, against 54.4 for always-Opus and 63.6 for always-small |
-
-The default stays at `prompt` = model and effort, with no `step` routing. No benchmark showed a gain from `step` routing that justifies its extra judge calls and its risk.
 
 ### Local tasks
 
