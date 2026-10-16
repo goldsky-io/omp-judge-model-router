@@ -9,7 +9,7 @@ The extension can route at two intervals:
 | `prompt` | Before each user prompt | The prompt |
 | `step` | After each batch of tool results, before the next LLM request in the tool loop | The prompt, the current tier and effort, and the latest tool calls and results |
 
-At each interval, the extension can route the model, the effort, both, or nothing. One judge request answers every question for that interval. The default is `prompt` = model and effort, and `step` = nothing. The [benchmark](#benchmark) shows why.
+At each interval, the extension can route the model, the effort, both, or nothing. One judge request answers every question for that interval. The default is `prompt` = model and effort, and `step` = nothing. The [benchmarks](#benchmarks) show why.
 
 | Tier | Model | Used for |
 |---|---|---|
@@ -101,7 +101,19 @@ An effort change does not cause a cache miss with omp on Claude Opus 5.5. In a t
 
 Each judge request costs about $0.00002 with Jev and adds about one second before the LLM request.
 
-## Benchmark
+## Benchmarks
+
+Three benchmarks measure the extension. The local benchmark runs short tasks with omp in print mode. Terminal-Bench 2.0 runs real terminal tasks with omp over ACP (Agent Client Protocol). The TwinRouterBench static track scores only the judge's tier choices, without running an agent.
+
+| Benchmark | What it measures | Default config result |
+|---|---|---|
+| Local tasks | Cost and pass rate on 6 short coding tasks | 34% cheaper than omp `auto`, 12/12 passed |
+| Terminal-Bench 2.0 subset | Cost and pass rate on 15 terminal tasks | 42% cheaper than omp `auto`, 13/15 passed (omp `auto`: 12/15) |
+| TwinRouterBench static | Tier choice on 970 agent steps | Combined score 72.7, against 54.4 for always-Opus and 63.6 for always-small |
+
+The default stays at `prompt` = model and effort, with no `step` routing. No benchmark showed a gain from `step` routing that justifies its extra judge calls and its risk.
+
+### Local tasks
 
 `bench/bench.py` runs the same tasks with omp alone and with several configurations of the extension, then prints a table. Each run is a fresh print-mode session in a temporary directory, with the advisor turned off. A run passes if its check command succeeds after the session ends.
 
@@ -112,7 +124,7 @@ python3 bench/bench.py --configs omp-auto,prompt-both --tasks fix-bug,lru-ttl
 
 The tasks are a two-question chat, a bug fix, a rename across files, a new function with tests, a subtle bug (a mutable default argument), and an LRU cache with expiry. Costs come from the session files: LLM usage, omp's built-in judge calls, and this extension's judge calls. The script appends raw rows to `bench-results.jsonl`.
 
-### Results
+#### Results
 
 Run on October 15, 2026, with omp 18.10.4, Claude Opus 5.5 as `default`, `zai/glm-5.3-flash` as `smol`, no `slow` role, and `openrouter/~typesafe/jev-latest` as the judge. Each configuration ran 6 tasks 2 times. Every run passed its check.
 
@@ -145,7 +157,96 @@ What the results show:
 - Model routing at each step saved the most. In an earlier run with the same code but an older wording of the effort question, it saved 6% over the default and took 25% longer. The size of this saving changes between runs.
 - The judge requests cost less than 0.4% of the total in every configuration.
 
-The default stays at `prompt` = model and effort, with no `step` routing. These six tasks are short, and a small model finishes all of them. They do not show what happens when the small model takes over steps of a long, hard task, where a failed step costs more than the saving. To measure that, run step routing on a benchmark with harder tasks before you turn it on. To turn it on, run `/judge-router step model,effort`.
+These six tasks are short, and a small model finishes all of them. They do not show what happens when the small model takes over steps of a long, hard task, where a failed step costs more than the saving.
+
+### Terminal-Bench 2.0
+
+[Terminal-Bench 2.0](https://www.tbench.ai) has 89 tasks that an agent does in a Docker container, each checked by tests. [Harbor](https://github.com/harbor-framework/harbor) runs them. `bench/terminal_bench/omp_acp_agent.py` is a Harbor agent built on Harbor's ACP adapter. It copies the omp binary, an omp configuration, the extension, and credentials into each task container, then runs `omp acp` there. Harbor approves every tool permission request. After each trial, the agent copies omp's session files into the trial logs.
+
+You need Docker, Harbor (`uv tool install harbor`), and a credentials file. Make the credentials file with `omp auth export`. Keep only the credentials that the run needs (here anthropic, zai, and openrouter). Replace each OAuth `refresh` value with a placeholder string, so that a container cannot rotate the refresh token of your host. Without a refresh token, a run must finish before the access token expires.
+
+```bash
+bench/terminal_bench/run.sh /path/to/creds.json /tmp/tb/jobs
+python3 bench/terminal_bench/report.py /tmp/tb/jobs
+```
+
+`run.sh` runs 15 tasks once for each of four configurations, all at the same time, two trials at a time per configuration. The tasks are short ones with small images: `headless-terminal`, `regex-log`, `chess-best-move`, `count-dataset-tokens`, `sqlite-db-truncate`, `password-recovery`, `git-multibranch`, `filter-js-from-html`, `log-summary-date-ranges`, `largest-eigenval`, `extract-elf`, `sanitize-git-repo`, `openssl-selfsigned-cert`, `nginx-request-logging`, and `cancel-async-tasks`.
+
+#### Results
+
+Run on October 16, 2026, with the same models and judge as the local tasks, Harbor 0.24.0, and 1 attempt per task. "omp auto" is omp without the extension, with `defaultThinkingLevel: auto`. Each configuration took 13 to 15 minutes.
+
+| Configuration | Passed | Cost $ | vs omp auto | Judge calls | Judge $ | Cache hit % | Opus / glm-flash calls |
+|---|---|---|---|---|---|---|---|
+| omp auto | 12/15 | 1.74 | | 15 | 0.0004 | 92 | 65 / 0 |
+| `prompt` = model, effort (default) | 13/15 | 1.01 | −42% | 15 | 0.0005 | 95 | 62 / 0 |
+| `prompt` = model, effort; `step` = effort | 13/15 | 1.04 | −40% | 64 | 0.0031 | 95 | 63 / 0 |
+| `prompt` = model, effort; `step` = model, effort | 12/15 | 1.04 | −40% | 61 | 0.0032 | 93 | 58 / 2 |
+
+Cost in dollars and result by task:
+
+| Task | omp auto | prompt: both | + step: effort | + step: both |
+|---|---|---|---|---|
+| cancel-async-tasks | pass 0.31 | pass 0.10 | pass 0.12 | pass 0.17 |
+| chess-best-move | fail 0.05 | pass 0.10 | pass 0.07 | fail 0.04 |
+| count-dataset-tokens | pass 0.05 | pass 0.08 | pass 0.05 | pass 0.07 |
+| extract-elf | pass 0.17 | pass 0.06 | pass 0.06 | pass 0.07 |
+| filter-js-from-html | fail 0.01 | fail 0.13 | fail 0.13 | fail 0.11 |
+| git-multibranch | pass 0.07 | pass 0.06 | pass 0.11 | pass 0.13 |
+| headless-terminal | pass 0.20 | pass 0.08 | pass 0.06 | pass 0.07 |
+| largest-eigenval | pass 0.52 | pass 0.05 | pass 0.07 | pass 0.06 |
+| log-summary-date-ranges | pass 0.05 | pass 0.05 | pass 0.06 | pass 0.04 |
+| nginx-request-logging | pass 0.04 | pass 0.05 | pass 0.05 | pass 0.05 |
+| openssl-selfsigned-cert | pass 0.07 | pass 0.07 | pass 0.07 | pass 0.05 |
+| password-recovery | fail 0.00 | fail 0.00 | fail 0.00 | fail 0.00 |
+| regex-log | pass 0.05 | pass 0.05 | pass 0.06 | pass 0.05 |
+| sanitize-git-repo | pass 0.06 | pass 0.06 | pass 0.06 | pass 0.06 |
+| sqlite-db-truncate | pass 0.10 | pass 0.06 | pass 0.06 | pass 0.07 |
+
+What the results show:
+
+- The judge sent every Terminal-Bench prompt to Opus. Each task is real work, so prompt-level model routing had no effect here.
+- The saving came from the effort. omp's built-in classifier chose `xhigh` for `largest-eigenval` and `cancel-async-tasks`, and the judge chose `medium`. Those two tasks cost $0.83 under omp auto and $0.15 with the extension, and both passed.
+- Step routing added 46 to 49 judge calls and saved nothing. With `step` = model and effort, the judge sent 2 steps to glm-flash, and `chess-best-move` failed after one of them.
+- Anthropic refused `password-recovery` in every configuration and `filter-js-from-html` under omp auto, with the message `Refusal (cyber): This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy.` These failures do not come from routing.
+- With one attempt per task, a difference of one passed task is within run-to-run variation.
+
+### TwinRouterBench static track
+
+[TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench) (arXiv 2605.18859) has 970 states taken from the middle of agent runs on SWE-bench, BFCL, mtRAG, QMSum, and PinchBench. Each state has a label: the cheapest of four tiers (low, mid, mid_high, high) that was confirmed to finish the task. A choice passes if its tier is at least the label. The benchmark reports four scores:
+
+- Case pass rate: the share of steps where the choice passes.
+- Trajectory pass rate: the share of steps in runs where every choice passes.
+- Cost savings: the saving against always using the high tier, with a penalty for each failed run.
+- Combined score: one number that weighs pass rate against cost savings.
+
+`bench/twinrouter/eval_judge.py` sends each state to the judge as one step decision, in the shape the extension uses: the user task, the latest steps, and one `choice` question. It runs two variants. `plugin` uses the extension's two tiers today, `smol` and `default`, mapped to low and high. `4tier` asks for the four TwinRouterBench tiers. The script writes the scores to `bench/twinrouter/twinrouter-<variant>.json`.
+
+```bash
+git clone https://github.com/CommonstackAI/TwinRouterBench
+cd TwinRouterBench && uv venv && uv pip install -e . && cd -
+TwinRouterBench/.venv/bin/python bench/twinrouter/eval_judge.py --repo TwinRouterBench
+```
+
+#### Results
+
+Run on October 16, 2026, on all 970 states, with `openrouter/~typesafe/jev-latest` as the judge. The three fixed choices are baselines that the TwinRouterBench scorer computes without a judge.
+
+| Router | Case pass % | Trajectory pass % | Cost savings % | Combined % | Judge $ |
+|---|---|---|---|---|---|
+| Always high | 100.0 | 100.0 | 0.0 | 54.4 | 0 |
+| Always mid_high | 82.5 | 65.6 | 54.7 | 51.9 | 0 |
+| Always low | 71.0 | 58.5 | 54.1 | 63.6 | 0 |
+| Judge, `plugin` (smol or default) | 94.5 | 85.2 | 39.8 | 72.7 | 0.08 |
+| Judge, `4tier` | 76.2 | 61.0 | 55.1 | 60.3 | 0.09 |
+
+What the results show:
+
+- With the extension's two tiers, the judge scored higher than every fixed choice. It kept 94.5% of steps safe and saved 39.8% against always using the high tier.
+- On SWE-bench steps alone, its cost savings score was −16.5%. The judge sent too many hard SWE-bench steps to the small tier, and each failed run counts as a full rerun on the high tier. This matches the Terminal-Bench result: step-level model routing is risky on long coding tasks.
+- With four tiers, the judge never chose the high tier and scored below always-low. The tier descriptions in this variant need work before the extension supports four tiers.
+
+TwinRouterBench also has a dynamic track that runs a router on 100 SWE-bench Verified tasks with its own agent and model pool (DeepSeek, MiniMax, Gemini Flash, and Claude Opus 4.6). It does not run omp or this extension, and the published runs cost $25 to $55 each, so it is not part of this benchmark.
 
 ## Uninstall
 
